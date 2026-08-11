@@ -52,6 +52,10 @@ public class SubqueryIterator extends CloseableAbstractIterator<JanusGraphElemen
 
     private boolean isTimerRunning;
 
+    private final int limit;
+
+    private int emittedCount;
+
     public SubqueryIterator(JointIndexQuery.Subquery subQuery, IndexSerializer indexSerializer,
                             BackendTransaction backendTx,
                             StandardJanusGraphTx tx,
@@ -59,6 +63,7 @@ public class SubqueryIterator extends CloseableAbstractIterator<JanusGraphElemen
                             Function<Object, ? extends JanusGraphElement> function, List<Object> otherResults) {
         this.subQuery = subQuery;
         this.indexCache = indexCache;
+        this.limit = limit;
         final List<Object> cacheResponse = indexCache.getIfPresent(subQuery);
         final Stream<?> stream;
         if (cacheResponse != null) {
@@ -84,6 +89,7 @@ public class SubqueryIterator extends CloseableAbstractIterator<JanusGraphElemen
                 })
                 .filter(r -> r != null) // ignore invalid elements
                 .limit(limit)
+                .peek(r -> emittedCount++)
                 .iterator();
     }
 
@@ -98,13 +104,19 @@ public class SubqueryIterator extends CloseableAbstractIterator<JanusGraphElemen
 
     /**
      * Close the iterator, stop timer and update profiler.
-     * Put results into cache if the underlying elementIterator is exhausted.
+     * Put results into cache only if the subquery results are complete, which means the index was read until it ran
+     * out of results rather than until the limit was reached.
      */
     @Override
     public void close() {
         if (isTimerRunning) {
             assert currentIds != null;
-            if (!elementIterator.hasNext()) {
+            //Reaching the limit stops the index from being read any further, so currentIds holds a prefix of the
+            //subquery results rather than all of them. The cache key of a subquery of a joint query does not include
+            //the limit, because updateLimit only propagates the limit when there is a single subquery, so caching a
+            //prefix would serve too few results to a later query with a larger limit. Fewer emitted elements than the
+            //limit means the limit never stopped anything, so the results are complete
+            if (!elementIterator.hasNext() && emittedCount < limit) {
                 indexCache.put(subQuery, currentIds);
             }
             profiler.setResultSize(currentIds.size());

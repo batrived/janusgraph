@@ -104,25 +104,32 @@ public class SubqueryIterator extends CloseableAbstractIterator<JanusGraphElemen
 
     /**
      * Close the iterator, stop timer and update profiler.
-     * Put results into cache only if the subquery results are complete, which means the index was read until it ran
-     * out of results rather than until the limit was reached.
+     * Put results into cache only if no later query can ask for more results than the cached list holds.
      */
     @Override
     public void close() {
         if (isTimerRunning) {
             assert currentIds != null;
-            //Reaching the limit stops the index from being read any further, so currentIds holds a prefix of the
-            //subquery results rather than all of them. The cache key of a subquery of a joint query does not include
-            //the limit, because updateLimit only propagates the limit when there is a single subquery, so caching a
-            //prefix would serve too few results to a later query with a larger limit. Fewer emitted elements than the
-            //limit means the limit never stopped anything, so the results are complete
-            if (!elementIterator.hasNext() && emittedCount < limit) {
+            if (!elementIterator.hasNext() && isSafeToCache()) {
                 indexCache.put(subQuery, currentIds);
             }
             profiler.setResultSize(currentIds.size());
             profiler.stopTimer();
             isTimerRunning = false;
         }
+    }
+
+    //The cache stores a result list against the limit of the subquery which produced it, and serves that list only to
+    //a later query whose limit is no larger. Two situations make currentIds safe to store.
+    //Fewer emitted elements than the limit means the limit never stopped the index being read, so currentIds holds
+    //every result and serves any later limit.
+    //Otherwise the limit truncated the read and currentIds is only a prefix. A prefix is still safe while the limit
+    //the cache records for it is no larger than the limit which produced it. That holds for a single subquery, because
+    //JointIndexQuery.updateLimit propagates the limit into it. It does not hold once a joint query has more than one
+    //subquery, because updateLimit then leaves the subquery limits alone: the cache would record the wider subquery
+    //limit for a prefix read under the narrower joint limit, and serve too few results to a later query in between.
+    private boolean isSafeToCache() {
+        return emittedCount < limit || subQuery.getLimit() <= limit;
     }
 
 }

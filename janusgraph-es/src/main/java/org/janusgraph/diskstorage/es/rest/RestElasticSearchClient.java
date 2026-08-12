@@ -399,11 +399,11 @@ public RestElasticSearchClient(RestClient delegate, int scrollKeepAlive, boolean
         final byte [] requestBytes;
         final byte [] requestSource;
         //Retained so that a failed bulk item can be interpreted against the operation which produced it
-        final ElasticSearchMutation.RequestType requestType;
+        final boolean removesContentOnly;
 
         @VisibleForTesting
         RequestBytes(final ElasticSearchMutation request) throws JsonProcessingException {
-            this.requestType = request.getRequestType();
+            this.removesContentOnly = request.removesContentOnly();
             Map<String, Object> requestData = new HashMap<>();
             if (useMappingTypes) {
                 requestData.put("_index", request.getIndex());
@@ -478,20 +478,20 @@ public RestElasticSearchClient(RestClient delegate, int scrollKeepAlive, boolean
             }
             RestBulkResponse.RestBulkItemResponse item = bulkResponseItem.iterator().next();
             final RequestBytes submittedItem = submittedBulkRequestItems.get(itemIndex);
-            if (item.getError() != null && !isAbsentDocumentDeletion(item, submittedItem)) {
+            if (item.getError() != null && !isAbsentDocumentRemoval(item, submittedItem)) {
                 errors.add(Triplet.with(item.getError(), item.getStatus(), submittedItem));
             }
         }
         return errors;
     }
 
-    //Deleting a document which is already absent leaves the index in the state the deletion asked for, so its 404 is
-    //a success. An update which returns 404 is a document_missing_exception: the write did not happen, and treating it
-    //as a success drops the mutation with nothing reported
-    private static boolean isAbsentDocumentDeletion(final RestBulkResponse.RestBulkItemResponse item,
-                                                    final RequestBytes submittedItem) {
-        return item.getStatus() == HttpStatus.SC_NOT_FOUND
-            && submittedItem.requestType == ElasticSearchMutation.RequestType.DELETE;
+    //Removing content from a document which is already absent leaves the index in the state the mutation asked for, so
+    //the 404 Elasticsearch answers with is a success. Deleting the whole document and running a script which deletes
+    //fields both count. A 404 for a mutation which adds content is a document_missing_exception: the write did not
+    //happen, and treating it as a success drops the mutation with nothing reported
+    private static boolean isAbsentDocumentRemoval(final RestBulkResponse.RestBulkItemResponse item,
+                                                   final RequestBytes submittedItem) {
+        return item.getStatus() == HttpStatus.SC_NOT_FOUND && submittedItem.removesContentOnly;
     }
 
     @VisibleForTesting

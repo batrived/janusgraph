@@ -41,11 +41,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
-//A bulk response reports item level failures inside an otherwise successful HTTP response. Every 404 used to be
-//treated as a success regardless of the operation which produced it. That is right for a delete, which is idempotent,
-//but an update returning 404 is a document_missing_exception: the write did not happen. Because a property change on a
-//SINGLE cardinality key produces a deletion and an addition against the same document, mutate() withholds the upsert,
-//so both items 404 when the document is absent and the element is never indexed again.
+//A bulk response reports item level failures inside an otherwise successful HTTP response. Every 404 used to be treated
+//as a success regardless of the mutation which produced it. That is right for a mutation which only removes content,
+//because an absent document already satisfies it, and both a whole document deletion and a script which deletes fields
+//qualify. It is wrong for a mutation which adds content: there the 404 is a document_missing_exception and the write did
+//not happen. A property change on a SINGLE cardinality key produces a field deletion and an addition against the same
+//document, and mutate() withholds the upsert from the addition, so the addition is the item worth reporting.
 @ExtendWith(MockitoExtension.class)
 public class RestClientBulkItemStatusTest {
 
@@ -91,9 +92,16 @@ public class RestClientBulkItemStatusTest {
         return response;
     }
 
+    //An update which adds content. Without an upsert Elasticsearch answers 404 when the document is absent
     private static ElasticSearchMutation update(String id) {
         return ElasticSearchMutation.createUpdateRequest(INDEX, TYPE, id,
             ImmutableMap.builder().put("doc", ImmutableMap.of("name", "value")), null);
+    }
+
+    //An update which runs the script mutate() uses to take fields out of a document
+    private static ElasticSearchMutation fieldDeletion(String id) {
+        return ElasticSearchMutation.createFieldDeletionRequest(INDEX, TYPE, id,
+            ImmutableMap.of("script", ImmutableMap.of("id", "deletion_script")));
     }
 
     private void bulkRequest(List<ElasticSearchMutation> mutations, List<String> operations, List<Integer> statuses)
@@ -114,6 +122,14 @@ public class RestClientBulkItemStatusTest {
     }
 
     @Test
+    public void shouldTreatTheFieldDeletionOfAnAbsentDocumentAsSuccess() throws IOException {
+        //Nothing is thrown: a document with no fields left to delete is the state the mutation asked for. Elasticsearch
+        //reports this as an update of a missing document, the same way it reports an addition which was lost
+        bulkRequest(Collections.singletonList(fieldDeletion("doc1")),
+            Collections.singletonList("update"), Collections.singletonList(404));
+    }
+
+    @Test
     public void shouldReportAnUpdateOfAMissingDocument() throws IOException {
         final IOException e = assertThrows(IOException.class,
             () -> bulkRequest(Collections.singletonList(update("doc1")),
@@ -131,13 +147,14 @@ public class RestClientBulkItemStatusTest {
     }
 
     @Test
-    public void shouldReportAMissingDocumentUpdateSubmittedAlongsideADeletion() throws IOException {
+    public void shouldReportOnlyTheAdditionWhenAFieldDeletionAccompaniesIt() throws IOException {
         //This is the shape mutate() produces for a value change on a SINGLE cardinality key: the field deletion script
-        //and the addition script against the same absent document
+        //and the addition script against the same absent document. mutate() leaves the addition without an upsert once
+        //the mutation has deletions, so the addition is the half which lost a write and the only half worth reporting
         final IOException e = assertThrows(IOException.class, () -> bulkRequest(
-            Arrays.asList(update("doc1"), update("doc1")),
+            Arrays.asList(fieldDeletion("doc1"), update("doc1")),
             Arrays.asList("update", "update"), Arrays.asList(404, 404)));
-        assertTrue(e.getMessage().contains("document_missing_exception"), e.getMessage());
+        assertEquals(1, e.getMessage().split("document_missing_exception", -1).length - 1, e.getMessage());
     }
 
     @Test
